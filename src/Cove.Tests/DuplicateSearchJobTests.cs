@@ -466,6 +466,26 @@ public sealed class DuplicateSearchJobTests
         => Assert.Equal(expected, ImageDuplicateSearchService.IsArchivePath(path));
 
     [Fact]
+    public async Task DefaultTitleSearchIncludesMetadataOnlyVideos()
+    {
+        await using var db = CreateContext();
+        var search = CompletedSearch();
+        search.MatchType = "title";
+        db.AddRange(
+            new Video { Title = "Metadata-only duplicate" },
+            new Video { Title = "Metadata-only duplicate" },
+            search);
+        await db.SaveChangesAsync(TestContext.Current.CancellationToken);
+        var service = new DuplicateSearchExecutionService(db, new CapturingJobService(), null!);
+
+        await service.ExecuteAsync(search.Id, null, new NullProgress(), TestContext.Current.CancellationToken);
+
+        var group = await db.DuplicateSearchGroups.Include(item => item.Items)
+            .SingleAsync(item => item.SearchId == search.Id, TestContext.Current.CancellationToken);
+        Assert.Equal(2, group.Items.Count);
+    }
+
+    [Fact]
     public async Task MetadataTransferFillsMissingValuesAndReparentsChildren()
     {
         await using var db = CreateContext();
@@ -579,5 +599,12 @@ public sealed class DuplicateSearchJobTests
         public JobInfo? GetJob(string jobId) => ReturnedJob?.Id == jobId ? ReturnedJob : null;
         public IReadOnlyList<JobInfo> GetAllJobs() => [];
         public IReadOnlyList<JobInfo> GetJobHistory() => [];
+    }
+
+    private sealed class NullProgress : IJobProgress
+    {
+        public void Report(double progress, string? subTask = null)
+        {
+        }
     }
 }

@@ -385,6 +385,11 @@ public sealed class DuplicateSearchExecutionService(
 
     private async Task<int[]> ResolveCandidateIdsAsync(DuplicateSearch search, CancellationToken ct)
     {
+        // Title and remote-ID matching also apply to metadata-only records. Requiring a file for
+        // the default, unscoped search silently excluded those videos from every match mode.
+        if (search.FolderMode == "all" && search.MinimumDuration <= 0)
+            return await db.Videos.AsNoTracking().Select(video => video.Id).ToArrayAsync(ct);
+
         var paths = DeserializeList(search.FolderPathsJson);
         var rows = await db.Videos
             .SelectMany(video => video.Files.Select(file => new { video.Id, file.Duration, file.Path }))
