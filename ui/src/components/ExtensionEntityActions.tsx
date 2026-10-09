@@ -12,6 +12,7 @@ export interface ExtensionEntityActionsProps {
   pageType?: string;
   renderMode?: "toolbar" | "menu";
   onInvoked?: () => void;
+  extraPayload?: Record<string, unknown>;
 }
 
 interface QueuedActionResponse {
@@ -29,12 +30,18 @@ function normalizeEntityType(entityType: string): string {
       return "video";
     case "images":
       return "image";
+    case "performers":
+      return "performer";
+    case "studios":
+      return "studio";
+    case "tags":
+      return "tag";
     default:
       return normalized;
   }
 }
 
-function buildActionPayload(action: ExtensionAction, entityType: string, pageType: string, entityId: number) {
+function buildActionPayload(action: ExtensionAction, entityType: string, pageType: string, entityId: number, extraPayload?: Record<string, unknown>) {
   return {
     actionId: action.id,
     extensionId: action.extensionId,
@@ -43,6 +50,7 @@ function buildActionPayload(action: ExtensionAction, entityType: string, pageTyp
     entityIds: [entityId],
     selectedIds: [entityId],
     selectedCount: 1,
+    ...extraPayload,
   };
 }
 
@@ -101,6 +109,7 @@ export function ExtensionEntityActions({
   pageType,
   renderMode = "toolbar",
   onInvoked,
+  extraPayload,
 }: ExtensionEntityActionsProps) {
   const normalizedEntityType = normalizeEntityType(entityType);
   const normalizedPageType = normalizeEntityType(pageType ?? entityType);
@@ -118,7 +127,7 @@ export function ExtensionEntityActions({
   );
 
   const actions = useMemo(() => {
-    if (normalizedEntityType !== "video" && normalizedEntityType !== "image") {
+    if (!["video", "image", "performer", "studio", "tag"].includes(normalizedEntityType)) {
       return [];
     }
 
@@ -128,7 +137,7 @@ export function ExtensionEntityActions({
   const invokeActionMut = useMutation<unknown, Error, ExtensionAction>({
     meta: { suppressGlobalError: true },
     mutationFn: async (action) => {
-      const payload = buildActionPayload(action, normalizedEntityType, normalizedPageType, entityId);
+      const payload = buildActionPayload(action, normalizedEntityType, normalizedPageType, entityId, extraPayload);
 
       if (action.handlerName) {
         const handler = resolveActionHandler(action.extensionId, action.handlerName);

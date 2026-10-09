@@ -1360,6 +1360,7 @@ function PerformerVideosPanel({ performerId, onNavigate }: { performerId: number
   const toolbar = (
     <MediaDetailListToolbar
       mediaType="videos"
+      extensionParent={{ entityType: "performer", entityId: performerId }}
       onNavigate={onNavigate}
       vrListSource={{
         label: pageLabel(),

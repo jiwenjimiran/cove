@@ -924,6 +924,7 @@ function StudioVideosPanel({
   const toolbar = (
     <MediaDetailListToolbar
       mediaType="videos"
+      extensionParent={{ entityType: "studio", entityId: studioId, includeChildStudios: includeSubStudios }}
       onNavigate={onNavigate}
       vrListSource={{
         label: pageLabel(),

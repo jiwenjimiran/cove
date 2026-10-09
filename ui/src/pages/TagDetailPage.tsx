@@ -720,6 +720,8 @@ function TagVideosPanel({
   const toolbar = (
     <MediaDetailListToolbar
       mediaType="videos"
+      extensionParent={{ entityType: "tag", entityId: tagId }}
+      extensionVideoFilter={objectFilter}
       onNavigate={onNavigate}
       vrListSource={{
         label: pageLabel(),

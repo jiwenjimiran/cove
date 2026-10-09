@@ -3,6 +3,7 @@ import { audios, galleries, images, texts, videos } from "../api/client";
 import type { FindFilter } from "../api/types";
 import { DetailListToolbar, type DetailListToolbarProps } from "./DetailListToolbar";
 import { MediaAggregateMetadata } from "./MediaAggregateMetadata";
+import { ExtensionEntityActions } from "./ExtensionEntityActions";
 
 type MediaType = "videos" | "images" | "galleries" | "audios" | "texts";
 
@@ -10,6 +11,8 @@ interface Props extends DetailListToolbarProps {
   mediaType: MediaType;
   aggregateObjectFilter: Record<string, unknown>;
   selectedIds: ReadonlySet<number>;
+  extensionParent?: { entityType: "performer" | "studio" | "tag"; entityId: number; includeChildStudios?: boolean };
+  extensionVideoFilter?: Record<string, unknown>;
 }
 
 function aggregate(
@@ -31,7 +34,7 @@ function aggregate(
 }
 
 /** Uses the same aggregate endpoints as top-level lists, with the parent relation included. */
-export function MediaDetailListToolbar({ mediaType, aggregateObjectFilter, selectedIds, ...props }: Props) {
+export function MediaDetailListToolbar({ mediaType, aggregateObjectFilter, selectedIds, extensionParent, extensionVideoFilter, ...props }: Props) {
   // The media type already names this list's entity, so relevance works without a filterMode.
   const listEntityType = props.listEntityType ?? mediaType;
   const aggregateFilter = { q: props.filter.q, page: 1, perPage: 0 };
@@ -65,11 +68,19 @@ export function MediaDetailListToolbar({ mediaType, aggregateObjectFilter, selec
     );
 
   return (
+    <>
+    {mediaType === "videos" && extensionParent && <ExtensionEntityActions
+      entityType={extensionParent.entityType}
+      entityId={extensionParent.entityId}
+      extraPayload={{ videoFilter: extensionVideoFilter ?? aggregateObjectFilter, findQuery: props.filter.q,
+        includeChildStudios: extensionParent.includeChildStudios }}
+    />}
     <DetailListToolbar
       {...props}
       listEntityType={listEntityType}
       metadataByline={metadata(filtered)}
       selectionMetadata={ids.length > 0 ? metadata(selected) : undefined}
     />
+    </>
   );
 }

@@ -26,6 +26,12 @@ function normalizeEntityType(entityType: string): string {
       return "video";
     case "images":
       return "image";
+    case "performers":
+      return "performer";
+    case "studios":
+      return "studio";
+    case "tags":
+      return "tag";
     default:
       return normalized;
   }
