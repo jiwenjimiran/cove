@@ -639,29 +639,6 @@ export function SegmentsPage({ onNavigate }: Props) {
     enabled: derivedQueryEnabled && !infinitePageSize,
   });
 
-  // Exact span total (cached, async). Kept independent of page/sort/direction so it's fetched once per
-  // filter set and reused while paging — the search response itself only carries -1 on the fast path.
-  const spansCountQuery = useDerivedSpansCountQuery({
-    activeProfileId,
-    pageNumber,
-    perPage,
-    q,
-    videoTitle,
-    videoTagIds,
-    videoTagDepth,
-    sort,
-    direction,
-    seed,
-    includeVideoIds: videoSelection.includeIds,
-    excludeVideoIds: videoSelection.excludeIds,
-    appliedQuery,
-    derivedQueryDescriptor: appliedQuery != null ? derivedQueryDescriptor : undefined,
-    rawFilter: combinedRawSegmentFilter,
-    // A span-level sort already scans the full matching set and returns its exact total.
-    // Running a second library-wide count beside it doubles the first-load work.
-    enabled: derivedQueryEnabled && ["updated_at", "created_at", "title"].includes(sort),
-  });
-
   const rawSegmentsQuery = useRawSegmentsQuery({
     pageNumber,
     perPage,
@@ -718,6 +695,34 @@ export function SegmentsPage({ onNavigate }: Props) {
     queryFn: queryDerivedSpansPage,
     enabled: derivedQueryEnabled && infinitePageSize,
     chunkSize: defaultPerPage,
+  });
+
+  // Let the page finish before requesting the exact aggregate. Row-level filters already make the
+  // page resolve every candidate span and populate the server count cache; starting both requests
+  // together would resolve the same library twice. Unfiltered browse still shows its first page
+  // promptly, then computes the exact total in the background.
+  const spansCountQuery = useDerivedSpansCountQuery({
+    activeProfileId,
+    pageNumber,
+    perPage,
+    q,
+    videoTitle,
+    videoTagIds,
+    videoTagDepth,
+    sort,
+    direction,
+    seed,
+    includeVideoIds: videoSelection.includeIds,
+    excludeVideoIds: videoSelection.excludeIds,
+    appliedQuery,
+    derivedQueryDescriptor: appliedQuery != null ? derivedQueryDescriptor : undefined,
+    rawFilter: combinedRawSegmentFilter,
+    enabled:
+      derivedQueryEnabled &&
+      ["updated_at", "created_at", "title"].includes(sort) &&
+      (infinitePageSize
+        ? derivedInfiniteQuery.isSuccess && !derivedInfiniteQuery.isPlaceholderData
+        : segmentsWindowQuery.isSuccess),
   });
 
   const rawInfiniteQuery = usePaginatedInfiniteQuery<RawSegmentItem>({

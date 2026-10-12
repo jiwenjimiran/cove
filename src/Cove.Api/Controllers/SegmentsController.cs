@@ -739,18 +739,18 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
 
         // 1. Gather the in-scope videos (ordered for the active sort) plus the profile/derived query.
         var videoList = await BuildSpanVideoListAsync(request, sort, descending, ct);
+        var performerVideoIds = await LoadMatchingVideoPerformerIdsAsync(request, ct);
         var profileId = await spanResolver.ResolveProfileIdAsync(request.Profile, ct);
         var derivedQueryRequest = BuildDerivedQueryRequest(request, profileId);
         var videoMap = videoList.ToDictionary(v => v.Id);
 
-        // 2. Fast path: for a video-level sort with no segment-row-dependent filter (the common browse
-        //    case) the videos are already in final order, so we resolve them in order and stop as soon
-        //    as the requested page is filled — paying only the current page's cost. The exact total is
-        //    fetched separately (spans/count, cached); here we report -1 (unknown) + HasMore. VideoIds
-        //    scoping is excluded because that branch is ordered by id rather than the sort.
+        // 2. With a video-level sort, videos are already in final order. Resolve and filter one
+        //    batch at a time, stopping once this page and one extra match have been found.
+        //    The exact total is fetched separately (spans/count, cached). VideoIds scoping is
+        //    excluded because that branch is ordered by id rather than the sort.
+        var needsSegmentRowsForPage = NeedsSegmentRows(request);
         var canTerminateEarly = request.VideoIds is not { Length: > 0 }
-            && IsVideoLevelSort(sort)
-            && !NeedsSegmentRows(request);
+            && IsVideoLevelSort(sort);
 
         if (canTerminateEarly)
         {
@@ -762,7 +762,7 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
 
             // An exact count also records how many spans each video contributed. Once available,
             // skip preceding videos for a deep page instead of resolving all earlier spans again.
-            if (request.VideoTagIds is not { Length: > 0 })
+            if (!needsSegmentRowsForPage && request.VideoTagIds is not { Length: > 0 })
             {
                 var countKey = await GetSpanCountCacheKeyAsync(request, profileId, ct);
                 if (memoryCache.TryGetValue<SpanCountCacheEntry>(countKey, out var cachedCount)
@@ -782,9 +782,9 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
                         firstVideoIndex++;
                     }
 
-                    for (var i = firstVideoIndex; i < videoList.Count && pageItems.Count < perPage; i += SpanResolveBatchSize)
+                    for (var i = firstVideoIndex; i < videoList.Count && pageItems.Count < perPage; i += SpanPageResolveBatchSize)
                     {
-                        var batchVideoIds = videoList.Skip(i).Take(SpanResolveBatchSize).Select(v => v.Id).ToList();
+                        var batchVideoIds = videoList.Skip(i).Take(SpanPageResolveBatchSize).Select(v => v.Id).ToList();
                         foreach (var (videoId, spans) in await ResolveSpanBatchAsync(batchVideoIds, profileId, derivedQueryRequest, ct))
                         {
                             if (!videoMap.TryGetValue(videoId, out var video)) continue;
@@ -804,20 +804,27 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
                 }
             }
 
-            for (var i = 0; i < videoList.Count && !earlyTerminated; i += SpanResolveBatchSize)
+            for (var i = 0; i < videoList.Count && !earlyTerminated; i += SpanPageResolveBatchSize)
             {
-                var batchVideoIds = videoList.Skip(i).Take(SpanResolveBatchSize).Select(v => v.Id).ToList();
+                var batchVideoIds = videoList.Skip(i).Take(SpanPageResolveBatchSize).Select(v => v.Id).ToList();
+                var batchItems = new List<SegmentSpanSearchResultItemDto>();
                 foreach (var (videoId, spans) in await ResolveSpanBatchAsync(batchVideoIds, profileId, derivedQueryRequest, ct))
                 {
                     if (!videoMap.TryGetValue(videoId, out var video)) continue;
                     foreach (var span in spans)
-                    {
-                        if (collected >= pageStart && pageItems.Count < perPage)
-                            pageItems.Add(new SegmentSpanSearchResultItemDto(span, video.Id, video.Title, video.UpdatedAt.ToString("o"), profileId));
-                        collected++;
-                        if (collected > neededCount) { earlyTerminated = true; break; }
-                    }
-                    if (earlyTerminated) break;
+                        batchItems.Add(new SegmentSpanSearchResultItemDto(
+                            span, video.Id, video.Title, video.UpdatedAt.ToString("o"), profileId));
+                }
+                var segmentRows = needsSegmentRowsForPage && batchItems.Count > 0
+                    ? await LoadSpanSegmentRowsAsync(batchItems.SelectMany(item => item.Span.SegmentIds), ct)
+                    : null;
+                foreach (var item in batchItems)
+                {
+                    if (segmentRows is not null && !MatchesSpanSearchRequest(item, request, segmentRows, performerVideoIds)) continue;
+                    if (collected >= pageStart && pageItems.Count < perPage)
+                        pageItems.Add(item);
+                    collected++;
+                    if (collected > neededCount) { earlyTerminated = true; break; }
                 }
             }
 
@@ -827,7 +834,7 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
             return Ok(new SegmentSpanSearchResponseDto(pageItems, exactTotal, page, perPage, HasMore: earlyTerminated));
         }
 
-        // 3. Span-level sorts and segment-row filters need to visit the whole scope. Keep only the
+        // 3. Span-level sorts and video-id-scoped searches need to visit the whole scope. Keep only the
         //    requested prefix, rather than millions of DTOs and their raw rows in process memory.
         var finalOffset = (long)(page - 1) * perPage;
         var canCacheCount = request.VideoTagIds is not { Length: > 0 } && !hasRelativeDates;
@@ -877,7 +884,7 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
                 : new Dictionary<int, SegmentSearchRow>();
             foreach (var item in batchItems)
             {
-                if (needsRows && !MatchesSpanSearchRequest(item, request, segmentRows)) continue;
+                if (needsRows && !MatchesSpanSearchRequest(item, request, segmentRows, performerVideoIds)) continue;
                 totalCount++;
                 totalDuration += Math.Max(0, item.Span.EndSec - item.Span.StartSec);
                 var ranked = new RankedSpan(item,
@@ -942,6 +949,7 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
         };
 
     private const int SpanResolveBatchSize = 400;
+    private const int SpanPageResolveBatchSize = 32;
 
     private sealed record SpanCountCacheEntry(
         SegmentSpanCountResponseDto Aggregate,
@@ -974,6 +982,7 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
             return Ok(cachedEntry!.Aggregate);
 
         var videoList = await BuildSpanVideoListAsync(request, sort, descending, ct);
+        var performerVideoIds = await LoadMatchingVideoPerformerIdsAsync(request, ct);
         var derivedQueryRequest = BuildDerivedQueryRequest(request, profileId);
         // Counting must not retain every resolved span in the library. A single batch bounds both
         // the segment-row lookup and the temporary span objects while preserving the search filters.
@@ -1013,7 +1022,7 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
             var segmentRows = await LoadSpanSegmentRowsAsync(batchItems.SelectMany(item => item.Span.SegmentIds), ct);
             foreach (var item in batchItems)
             {
-                if (!MatchesSpanSearchRequest(item, request, segmentRows)) continue;
+                if (!MatchesSpanSearchRequest(item, request, segmentRows, performerVideoIds)) continue;
                 totalCount++;
                 totalDuration += Math.Max(0, item.Span.EndSec - item.Span.StartSec);
             }
@@ -1054,6 +1063,7 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
         SegmentSpanSearchRequestDto request, string sort, bool descending, CancellationToken ct)
     {
         var videoQuery = db.Videos.AsNoTracking().AsQueryable();
+        videoQuery = ApplySpanCandidateFilters(videoQuery, request);
         if (request.VideoIds is { Length: > 0 })
         {
             var idSet = request.VideoIds.ToHashSet();
@@ -1105,6 +1115,94 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
 
         var ordered = await videoQuery.Select(s => new { s.Id, s.Title, s.UpdatedAt }).ToListAsync(ct);
         return ordered.Select(s => (s.Id, (string?)s.Title, (DateTimeOffset)s.UpdatedAt)).ToList();
+    }
+
+    private IQueryable<Video> ApplySpanCandidateFilters(
+        IQueryable<Video> videos, SegmentSpanSearchRequestDto request)
+    {
+        // These are necessary conditions for the final span-level filters. Each criterion gets its
+        // own EXISTS: different contributing segments can satisfy different criteria in one span.
+        // Keep the final MatchesSpanSearchRequest check after resolution for display rules and merges.
+        var videoSegments = db.Segments.AsNoTracking()
+            .Where(segment => segment.HostType == SegmentHostType.Video);
+
+        if (request.TagIds is { Length: > 0 })
+        {
+            var tagIds = request.TagIds;
+            videos = videos.Where(video => videoSegments.Any(segment =>
+                segment.HostId == video.Id && segment.TagId.HasValue && tagIds.Contains(segment.TagId.Value)));
+        }
+
+        if (request.RefIds is { Length: > 0 })
+        {
+            var refIds = request.RefIds;
+            videos = videos.Where(video => videoSegments.Any(segment =>
+                segment.HostId == video.Id && segment.RefId.HasValue && refIds.Contains(segment.RefId.Value)));
+        }
+
+        if (request.PerformerIds is { Length: > 0 })
+        {
+            var performerIds = request.PerformerIds;
+            // Segments-page Performers refers to the video's performers. Raw Segments keeps
+            // its own timed-segment performer-reference filter.
+            videos = videos.Where(video => db.Set<VideoPerformer>().Any(link =>
+                link.VideoId == video.Id && performerIds.Contains(link.PerformerId)));
+        }
+
+        // For ordinary profile spans, kind and source are copied from contributing segments.
+        // Derived-query spans instead use their operator as these fields, so they cannot be
+        // narrowed this way without risking a false negative.
+        if (request.DerivedQuery is null && !string.IsNullOrWhiteSpace(request.Kind))
+        {
+            var kind = request.Kind.Trim().ToLowerInvariant();
+            videos = videos.Where(video => videoSegments.Any(segment =>
+                segment.HostId == video.Id && segment.Kind != null && segment.Kind.ToLower() == kind));
+        }
+
+        if (request.DerivedQuery is null && !string.IsNullOrWhiteSpace(request.SourceKey))
+        {
+            var sourceKey = request.SourceKey.Trim().ToLowerInvariant();
+            videos = videos.Where(video => videoSegments.Any(segment =>
+                segment.HostId == video.Id && segment.SourceKey.ToLower() == sourceKey));
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.SourceCategory))
+        {
+            switch (request.SourceCategory.Trim().ToLowerInvariant())
+            {
+                case "extensions":
+                    videos = videos.Where(video => videoSegments.Any(segment =>
+                        segment.HostId == video.Id && segment.SourceKey.ToLower().StartsWith("ext:")));
+                    break;
+                case "user":
+                    videos = videos.Where(video => videoSegments.Any(segment =>
+                        segment.HostId == video.Id && segment.SourceKey.ToLower() == "user"));
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.SourceRunId)
+            && NormalizeCriterionModifier(request.SourceRunIdModifier) == "EQUALS")
+        {
+            var sourceRunId = request.SourceRunId.Trim().ToLowerInvariant();
+            videos = videos.Where(video => videoSegments.Any(segment =>
+                segment.HostId == video.Id && segment.SourceRunId != null
+                    && segment.SourceRunId.Trim().ToLower() == sourceRunId));
+        }
+
+        return videos;
+    }
+
+    private async Task<HashSet<int>> LoadMatchingVideoPerformerIdsAsync(
+        SegmentSpanSearchRequestDto request, CancellationToken ct)
+    {
+        if (request.PerformerIds is not { Length: > 0 })
+            return [];
+        var performerIds = request.PerformerIds;
+        return (await db.Set<VideoPerformer>().AsNoTracking()
+            .Where(link => performerIds.Contains(link.PerformerId))
+            .Select(link => link.VideoId)
+            .ToListAsync(ct)).ToHashSet();
     }
 
     private async Task<IReadOnlyList<(int VideoId, IReadOnlyList<ResolvedSpan> Spans)>> ResolveSpanBatchAsync(
@@ -1233,7 +1331,6 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
             || !string.IsNullOrWhiteSpace(request.UpdatedAt)
             || request.TagIds is { Length: > 0 }
             || request.RefIds is { Length: > 0 }
-            || request.PerformerIds is { Length: > 0 }
             || request.Confidence.HasValue
             || request.DurationSec.HasValue
             || SortNeedsSegmentRows(request.Sort);
@@ -1379,7 +1476,7 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
         return rows.ToDictionary(row => row.Id);
     }
 
-    private static bool MatchesSpanSearchRequest(SegmentSpanSearchResultItemDto item, SegmentSpanSearchRequestDto request, IReadOnlyDictionary<int, SegmentSearchRow> segmentRows)
+    private static bool MatchesSpanSearchRequest(SegmentSpanSearchResultItemDto item, SegmentSpanSearchRequestDto request, IReadOnlyDictionary<int, SegmentSearchRow> segmentRows, IReadOnlySet<int>? performerVideoIds = null)
     {
         var rows = item.Span.SegmentIds
             .Select(id => segmentRows.TryGetValue(id, out var row) ? row : null)
@@ -1450,8 +1547,7 @@ public class SegmentsController(CoveContext db, SegmentSpanResolver spanResolver
 
         if (request.PerformerIds is { Length: > 0 })
         {
-            var performerIds = request.PerformerIds.ToHashSet();
-            if (!rows.Any(row => (row.DirectPerformerId.HasValue && performerIds.Contains(row.DirectPerformerId.Value)) || (row.FacePerformerId.HasValue && performerIds.Contains(row.FacePerformerId.Value))))
+            if (performerVideoIds?.Contains(item.VideoId) != true)
                 return false;
         }
 

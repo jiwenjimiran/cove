@@ -1,3 +1,4 @@
+using Cove.ApiTests.Builders;
 using Cove.ApiTests.Infrastructure;
 using Cove.Core.DTOs;
 using Cove.Core.Entities;
@@ -99,6 +100,77 @@ public sealed class SegmentSpanLifecycleApiTests(ITestOutputHelper output, CoveA
         derivedAfterDelete.Spans.Should().ContainSingle().Which.SegmentIds.Should().Equal(second.Id);
         var deleted = () => eva.GetVideoSegmentAsync(video, first.Id);
         await deleted.Should().ThrowAsync<InvalidOperationException>().WithMessage("*returned 404 (NotFound)*");
+    }
+
+    [Fact]
+    [CoversEndpoint("POST", "/api/segments/spans/search")]
+    [CoversEndpoint("POST", "/api/segments/spans/count")]
+    public async Task GivenSegmentTagFaceAndPerformerFilters_WhenSearchingSpans_ThenCandidateVideosKeepExactResults()
+    {
+        var owner = AsUser();
+        var suffix = Guid.NewGuid().ToString("N");
+        var profile = await AsUser(ApiTestUsers.Eva).CreateSegmentDisplayProfileAsync(
+            new SegmentDisplayProfileCreateDto($"Candidate profile {suffix}", null, false),
+            TestContext.Current.CancellationToken);
+        var tag = await owner.CreateTagAsync($"Candidate tag {suffix}", TestContext.Current.CancellationToken);
+        var otherTag = await owner.CreateTagAsync($"Other candidate tag {suffix}", TestContext.Current.CancellationToken);
+        var performer = await owner.CreatePerformerAsync(new PerformerBuilder().WithName($"Candidate performer {suffix}").Build(), TestContext.Current.CancellationToken);
+        var face = await owner.CreateFaceAsync(new FaceCreateDto($"Candidate face {suffix}", performer.Id, false, null), TestContext.Current.CancellationToken);
+        var faceVideo = await owner.CreateVideoAsync($"Face candidate {suffix}", TestContext.Current.CancellationToken);
+        var directVideo = await owner.CreateVideoAsync($"Direct candidate {suffix}", TestContext.Current.CancellationToken);
+        var performerVideo = await owner.CreateVideoAsync($"Video performer candidate {suffix}", TestContext.Current.CancellationToken);
+        var unrelatedVideo = await owner.CreateVideoAsync($"Unrelated candidate {suffix}", TestContext.Current.CancellationToken);
+        await owner.UpdateVideoAsync(performerVideo.Id, new { performerIds = new[] { performer.Id } }, TestContext.Current.CancellationToken);
+        await owner.CreateVideoSegmentAsync(faceVideo,
+            Segment(1, 4, tag.Id, "chapter", "user", "Face") with { RefId = face.Id },
+            TestContext.Current.CancellationToken);
+        await owner.CreateVideoSegmentAsync(directVideo,
+            Segment(5, 8, tag.Id, "performer", "candidate", "Direct") with
+                { RefId = performer.Id, SourceRunId = "RUN" },
+            TestContext.Current.CancellationToken);
+        await owner.CreateVideoSegmentAsync(performerVideo,
+            Segment(8, 9, tag.Id, "chapter", "candidate", "Video performer only"),
+            TestContext.Current.CancellationToken);
+        await owner.CreateVideoSegmentAsync(unrelatedVideo,
+            Segment(9, 12, otherTag.Id, "chapter", "candidate", "Other"),
+            TestContext.Current.CancellationToken);
+
+        var request = new SegmentSpanSearchRequestDto(profile.Id, null, 1, 10, "updated_at", "desc",
+            null, null, null, null) with { TagIds = [tag.Id] };
+        var search = await AsUser(ApiTestUsers.Eva).SearchResolvedSpansAsync(request, TestContext.Current.CancellationToken);
+        var count = await AsUser(ApiTestUsers.Eva).CountResolvedSpansAsync(request, TestContext.Current.CancellationToken);
+        search.Items.Select(item => item.VideoId).Should().BeEquivalentTo([faceVideo.Id, directVideo.Id, performerVideo.Id]);
+        search.TotalCount.Should().Be(3);
+        count.TotalCount.Should().Be(3);
+
+        var performerRequest = request with { PerformerIds = [performer.Id] };
+        var performerSearch = await AsUser(ApiTestUsers.Eva).SearchResolvedSpansAsync(
+            performerRequest, TestContext.Current.CancellationToken);
+        var performerCount = await AsUser(ApiTestUsers.Eva).CountResolvedSpansAsync(
+            performerRequest, TestContext.Current.CancellationToken);
+        performerSearch.Items.Should().ContainSingle().Which.VideoId.Should().Be(performerVideo.Id);
+        performerCount.TotalCount.Should().Be(1);
+
+        var faceSearch = await AsUser(ApiTestUsers.Eva).SearchResolvedSpansAsync(
+            request with { RefIds = [face.Id], Kind = "chapter" }, TestContext.Current.CancellationToken);
+        faceSearch.Items.Should().ContainSingle().Which.VideoId.Should().Be(faceVideo.Id);
+
+        var directSearch = await AsUser(ApiTestUsers.Eva).SearchResolvedSpansAsync(
+            request with { Kind = "PERFORMER", SourceKey = "CANDIDATE", SourceRunId = "run",
+                SourceRunIdModifier = "EQUALS" }, TestContext.Current.CancellationToken);
+        directSearch.Items.Should().ContainSingle().Which.VideoId.Should().Be(directVideo.Id);
+
+        var userSearch = await AsUser(ApiTestUsers.Eva).SearchResolvedSpansAsync(
+            request with { SourceCategory = "user" }, TestContext.Current.CancellationToken);
+        userSearch.Items.Should().ContainSingle().Which.VideoId.Should().Be(faceVideo.Id);
+
+        // Derived spans use the operator as their kind and "derived" as their source. Neither value needs to exist
+        // on a raw segment, so the raw kind/source candidate filters must not exclude them.
+        var derivedSearch = await AsUser(ApiTestUsers.Eva).SearchResolvedSpansAsync(
+            request with { DerivedQuery = new SegmentSpanDerivedQueryDto("union",
+                [new SegmentSpanOperandDto("user", "chapter", [tag.Id], null)], 0, 0),
+                Kind = "union", SourceKey = "derived" }, TestContext.Current.CancellationToken);
+        derivedSearch.Items.Should().ContainSingle().Which.VideoId.Should().Be(faceVideo.Id);
     }
 
     [Fact]
