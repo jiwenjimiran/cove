@@ -2302,7 +2302,10 @@ export function SettingsPage() {
                     min={1}
                     max={128}
                     onChange={(value) =>
-                      updateDraft((current) => ({ ...current, maxSimultaneousJobs: value ?? current.maxSimultaneousJobs ?? 1 }))
+                      updateDraft((current) => ({
+                        ...current,
+                        maxSimultaneousJobs: value ?? current.maxSimultaneousJobs ?? 1,
+                      }))
                     }
                   />
                 </SectionCard>
